@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String
+  role         String   @default("user")
+  memberSince  DateTime?
+  payments     Payment[]
+  createdAt    DateTime @default(now())
+}
+
+model Formation {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  price       Float
+  imageUrl    String?
+  payments    Payment[]
+  createdAt   DateTime @default(now())
+}
+
+model Event {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  date        DateTime
+  price       Float
+  imageUrl    String?
+  createdAt   DateTime @default(now())
+}
+
+model Payment {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  formationId     String?
+  formation       Formation? @relation(fields: [formationId], references: [id])
+  amount          Float
+  currency        String   @default("eur")
+  status          String   @default("pending")
+  stripeSessionId String?
+  paypalOrderId   String?
+  method          String
+  createdAt       DateTime @default(now())
+}
