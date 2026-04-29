@@ -7,7 +7,9 @@ const app = express();
 app.use(helmet());
 app.use(cors());
 
+
 // ⚠️ Webhook avant express.json()
+app.use('/api/member', require('./src/routes/member'));
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
