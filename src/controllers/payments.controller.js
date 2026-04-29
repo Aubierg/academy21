@@ -1,5 +1,9 @@
 const stripe = require('../lib/stripe');
 const prisma = require('../lib/prisma');
+const { ordersController } = require('../lib/paypal');
+const { sendConfirmationEmail } = require('../lib/emails');
+
+// ─── STRIPE ───────────────────────────────────────────
 
 exports.createCheckout = async (req, res) => {
   try {
@@ -21,7 +25,6 @@ exports.createCheckout = async (req, res) => {
       metadata: { userId: req.user.id, formationId: formationId || '' }
     });
 
-    // Enregistre le paiement en pending
     await prisma.payment.create({
       data: {
         userId: req.user.id,
@@ -31,6 +34,15 @@ exports.createCheckout = async (req, res) => {
         status: 'pending',
         stripeSessionId: session.id
       }
+    });
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    await sendConfirmationEmail({
+      to: user.email,
+      name: user.email,
+      amount,
+      method: 'stripe',
+      title
     });
 
     res.json({ url: session.url });
@@ -66,4 +78,75 @@ exports.getMyPayments = async (req, res) => {
     orderBy: { createdAt: 'desc' }
   });
   res.json(payments);
+};
+
+// ─── PAYPAL ───────────────────────────────────────────
+
+exports.createPaypalOrder = async (req, res) => {
+  try {
+    const { amount, formationId, title } = req.body;
+
+    const order = await ordersController.createOrder({
+      body: {
+        intent: 'CAPTURE',
+        purchaseUnits: [{
+          amount: {
+            currencyCode: 'EUR',
+            value: amount.toString()
+          },
+          description: title
+        }],
+        applicationContext: {
+          returnUrl: `${process.env.FRONTEND_URL}/paiement/succes`,
+          cancelUrl: `${process.env.FRONTEND_URL}/paiement/echec`
+        }
+      }
+    });
+
+    await prisma.payment.create({
+      data: {
+        userId: req.user.id,
+        formationId: formationId || null,
+        amount,
+        method: 'paypal',
+        status: 'pending',
+        paypalOrderId: order.result.id
+      }
+    });
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    await sendConfirmationEmail({
+      to: user.email,
+      name: user.email,
+      amount,
+      method: 'paypal',
+      title
+    });
+
+    const approvalUrl = order.result.links.find(l => l.rel === 'approve').href;
+    res.json({ url: approvalUrl, orderId: order.result.id });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.capturePaypalOrder = async (req, res) => {
+  try {
+    const { orderId } = req.body;
+
+    const capture = await ordersController.captureOrder({
+      id: orderId,
+      body: {}
+    });
+
+    await prisma.payment.updateMany({
+      where: { paypalOrderId: orderId },
+      data: { status: 'succeeded' }
+    });
+
+    res.json({ status: capture.result.status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
