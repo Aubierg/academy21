@@ -2,6 +2,22 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_test_dummy
 const prisma = require('../lib/prisma');
 const { sendConfirmationEmail } = require('../lib/emails');
 
+// ─── PayPal token helper ───────────────────────────────────────────────────
+const PAYPAL_BASE = process.env.PAYPAL_ENV === 'production'
+  ? 'https://api-m.paypal.com'
+  : 'https://api-m.sandbox.paypal.com';
+
+async function getPaypalToken() {
+  const auth = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_SECRET}`).toString('base64');
+  const res = await fetch(`${PAYPAL_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=client_credentials'
+  });
+  const data = await res.json();
+  return data.access_token;
+}
+
 // ─── Stripe Checkout ──────────────────────────────────────────────────────
 exports.createCheckout = async (req, res) => {
   try {
@@ -49,12 +65,10 @@ exports.webhook = async (req, res) => {
     const title = meta.title || 'Formation';
 
     try {
-      // Email client
       if (clientEmail) {
         await sendConfirmationEmail({ to: clientEmail, name: clientName, amount, method: 'stripe', title });
         console.log('📧 Email client envoyé à', clientEmail);
       }
-      // Email admin
       await sendConfirmationEmail({
         to: process.env.ADMIN_EMAIL,
         name: clientName,
@@ -73,24 +87,29 @@ exports.webhook = async (req, res) => {
 };
 
 // ─── PayPal ───────────────────────────────────────────────────────────────
-const paypalClientInfoCache = {};
-
 exports.createPaypalOrder = async (req, res) => {
   try {
     const { amount = 490, title = 'Formation IA', clientInfo } = req.body;
-    const auth = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_SECRET}`).toString('base64');
-    const tokenRes = await fetch('https://api-m.sandbox.paypal.com/v1/oauth2/token', {
-      method: 'POST',
-      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'grant_type=client_credentials'
-    });
-    const { access_token } = await tokenRes.json();
-    const orderRes = await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', {
+
+    const access_token = await getPaypalToken();
+    const orderRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         intent: 'CAPTURE',
-        purchase_units: [{ amount: { currency_code: 'EUR', value: String(amount) }, description: title }],
+        purchase_units: [{
+          amount: { currency_code: 'EUR', value: String(amount) },
+          description: title,
+          // Store client info in custom_id as JSON so it survives server restarts
+          custom_id: JSON.stringify({
+            prenom: clientInfo?.prenom || '',
+            nom: clientInfo?.nom || '',
+            email: clientInfo?.email || '',
+            telephone: clientInfo?.telephone || '',
+            title,
+            amount
+          })
+        }],
         application_context: {
           return_url: `${process.env.FRONTEND_URL}/paiement/succes`,
           cancel_url: `${process.env.FRONTEND_URL}/paiement/echec`
@@ -98,7 +117,10 @@ exports.createPaypalOrder = async (req, res) => {
       })
     });
     const order = await orderRes.json();
-    if (clientInfo && order.id) paypalClientInfoCache[order.id] = { clientInfo, title, amount };
+    if (!order.id) {
+      console.error('PayPal order error:', order);
+      return res.status(500).json({ error: 'Erreur création commande PayPal' });
+    }
     const approveUrl = order.links?.find(l => l.rel === 'approve')?.href;
     res.json({ url: approveUrl, orderId: order.id });
   } catch (err) {
@@ -110,24 +132,32 @@ exports.createPaypalOrder = async (req, res) => {
 exports.capturePaypalOrder = async (req, res) => {
   try {
     const { orderId } = req.body;
-    const auth = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_SECRET}`).toString('base64');
-    const tokenRes = await fetch('https://api-m.sandbox.paypal.com/v1/oauth2/token', {
-      method: 'POST',
-      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'grant_type=client_credentials'
-    });
-    const { access_token } = await tokenRes.json();
-    const captureRes = await fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${orderId}/capture`, {
+    if (!orderId) return res.status(400).json({ error: 'orderId requis' });
+
+    const access_token = await getPaypalToken();
+    const captureRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${orderId}/capture`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' }
     });
     const capture = await captureRes.json();
-    const cached = paypalClientInfoCache[orderId] || {};
-    const clientInfo = cached.clientInfo || {};
-    const title = cached.title || 'Formation';
-    const amount = cached.amount || 490;
+
+    // Retrieve client info from custom_id stored in the order
+    const customId = capture.purchase_units?.[0]?.custom_id;
+    let clientInfo = {}, title = 'Formation', amount = 490;
+    if (customId) {
+      try {
+        const parsed = JSON.parse(customId);
+        clientInfo = { prenom: parsed.prenom, nom: parsed.nom, email: parsed.email, telephone: parsed.telephone };
+        title = parsed.title || title;
+        amount = parsed.amount || amount;
+      } catch {
+        console.warn('Could not parse PayPal custom_id');
+      }
+    }
+
     const clientEmail = clientInfo.email;
     const clientName = `${clientInfo.prenom || ''} ${clientInfo.nom || ''}`.trim() || clientEmail;
+
     try {
       if (clientEmail) {
         await sendConfirmationEmail({ to: clientEmail, name: clientName, amount, method: 'paypal', title });
@@ -146,7 +176,7 @@ exports.capturePaypalOrder = async (req, res) => {
     } catch (emailErr) {
       console.error('Email error:', emailErr.message);
     }
-    delete paypalClientInfoCache[orderId];
+
     res.json({ success: true, capture });
   } catch (err) {
     console.error('PayPal capture error:', err.message);
