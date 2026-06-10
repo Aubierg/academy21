@@ -1,0 +1,51 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: password123 # Db password for the test db
+          POSTGRES_DB: academy21_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Setup Database
+        env:
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/academy21_test # Replace this with the database url for the test db
+        run: npx prisma migrate deploy
+
+      - name: Run Tests
+        env:
+          DATABASE_URL: postgresql://postgres:password123@localhost:5432/academy21_test # Replace this too with the real db url for the project
+          JWT_SECRET: abcdefghijklmnopqrstuvwxyz1234567890.,/\
+          FRONTEND_URL: http://localhost:3000
+          SENDGRID_API_KEY: test_key # Replace this with the real api key
+          MAIL_FROM: test@example.com
+        run: npm test
