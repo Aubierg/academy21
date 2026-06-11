@@ -2,7 +2,6 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_test_dummy
 const prisma = require('../lib/prisma');
 const { sendConfirmationEmail } = require('../lib/emails');
 
-// ─── PayPal token helper ───────────────────────────────────────────────────
 const PAYPAL_BASE = process.env.PAYPAL_ENV === 'production'
   ? 'https://api-m.paypal.com'
   : 'https://api-m.sandbox.paypal.com';
@@ -22,6 +21,7 @@ async function getPaypalToken() {
 exports.createCheckout = async (req, res) => {
   try {
     const { price = 490, title = 'Formation IA Marketing de Réseau', formationId, clientInfo } = req.body;
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{ price_data: { currency: 'eur', product_data: { name: title }, unit_amount: Math.round(price * 100) }, quantity: 1 }],
@@ -32,12 +32,46 @@ exports.createCheckout = async (req, res) => {
         formationId: formationId || 'ia-marketing-reseau',
         title,
         amount: String(price),
+        clientEmail: clientInfo?.email || '',
         clientPrenom: clientInfo?.prenom || '',
         clientNom: clientInfo?.nom || '',
-        clientEmail: clientInfo?.email || '',
         clientTel: clientInfo?.telephone || '',
       }
     });
+
+    // ✅ Enregistrer le paiement en base
+    await prisma.payment.create({
+      data: {
+        userId: req.user.id,
+        amount: price,
+        currency: 'eur',
+        status: 'completed',
+        method: 'stripe',
+        stripeSessionId: session.id,
+      }
+    });
+
+    // ✅ Envoyer les emails
+    const clientEmail = clientInfo?.email || req.user?.email;
+    const clientName = clientInfo?.prenom
+      ? `${clientInfo.prenom} ${clientInfo.nom || ''}`.trim()
+      : clientEmail;
+
+    if (clientEmail) {
+      try {
+        await sendConfirmationEmail({ to: clientEmail, name: clientName, amount: price, method: 'stripe', title });
+        console.log('📧 Email client envoyé à', clientEmail);
+        await sendConfirmationEmail({
+          to: process.env.ADMIN_EMAIL, name: clientName, amount: price,
+          method: 'stripe', title, isAdminNotif: true,
+          clientInfo: { prenom: clientInfo?.prenom || '', nom: clientInfo?.nom || '', email: clientEmail, telephone: clientInfo?.telephone || '' }
+        });
+        console.log('📧 Email admin envoyé');
+      } catch (emailErr) {
+        console.error('Email error:', emailErr.message);
+      }
+    }
+
     res.json({ url: session.url });
   } catch (error) {
     console.error('Stripe Error:', error.message);
@@ -47,42 +81,6 @@ exports.createCheckout = async (req, res) => {
 
 // ─── Stripe Webhook ───────────────────────────────────────────────────────
 exports.webhook = async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || 'whsec_dummy');
-  } catch (err) {
-    console.error('Webhook signature error:', err.message);
-    return res.status(400).json({ error: err.message });
-  }
-
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const meta = session.metadata || {};
-    const clientEmail = meta.clientEmail;
-    const clientName = `${meta.clientPrenom} ${meta.clientNom}`.trim() || clientEmail;
-    const amount = parseFloat(meta.amount) || 490;
-    const title = meta.title || 'Formation';
-
-    try {
-      if (clientEmail) {
-        await sendConfirmationEmail({ to: clientEmail, name: clientName, amount, method: 'stripe', title });
-        console.log('📧 Email client envoyé à', clientEmail);
-      }
-      await sendConfirmationEmail({
-        to: process.env.ADMIN_EMAIL,
-        name: clientName,
-        amount,
-        method: 'stripe',
-        title,
-        isAdminNotif: true,
-        clientInfo: { prenom: meta.clientPrenom, nom: meta.clientNom, email: clientEmail, telephone: meta.clientTel }
-      });
-      console.log('📧 Email admin envoyé');
-    } catch (emailErr) {
-      console.error('Email error:', emailErr.message);
-    }
-  }
   res.json({ received: true });
 };
 
@@ -90,7 +88,6 @@ exports.webhook = async (req, res) => {
 exports.createPaypalOrder = async (req, res) => {
   try {
     const { amount = 490, title = 'Formation IA', clientInfo } = req.body;
-
     const access_token = await getPaypalToken();
     const orderRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
       method: 'POST',
@@ -100,14 +97,13 @@ exports.createPaypalOrder = async (req, res) => {
         purchase_units: [{
           amount: { currency_code: 'EUR', value: String(amount) },
           description: title,
-          // Store client info in custom_id as JSON so it survives server restarts
           custom_id: JSON.stringify({
+            userId: req.user.id,
             prenom: clientInfo?.prenom || '',
             nom: clientInfo?.nom || '',
-            email: clientInfo?.email || '',
+            email: clientInfo?.email || req.user?.email || '',
             telephone: clientInfo?.telephone || '',
-            title,
-            amount
+            title, amount
           })
         }],
         application_context: {
@@ -117,10 +113,7 @@ exports.createPaypalOrder = async (req, res) => {
       })
     });
     const order = await orderRes.json();
-    if (!order.id) {
-      console.error('PayPal order error:', order);
-      return res.status(500).json({ error: 'Erreur création commande PayPal' });
-    }
+    if (!order.id) return res.status(500).json({ error: 'Erreur création commande PayPal' });
     const approveUrl = order.links?.find(l => l.rel === 'approve')?.href;
     res.json({ url: approveUrl, orderId: order.id });
   } catch (err) {
@@ -141,18 +134,30 @@ exports.capturePaypalOrder = async (req, res) => {
     });
     const capture = await captureRes.json();
 
-    // Retrieve client info from custom_id stored in the order
     const customId = capture.purchase_units?.[0]?.custom_id;
-    let clientInfo = {}, title = 'Formation', amount = 490;
+    let clientInfo = {}, title = 'Formation', amount = 490, userId = null;
     if (customId) {
       try {
         const parsed = JSON.parse(customId);
         clientInfo = { prenom: parsed.prenom, nom: parsed.nom, email: parsed.email, telephone: parsed.telephone };
         title = parsed.title || title;
         amount = parsed.amount || amount;
-      } catch {
-        console.warn('Could not parse PayPal custom_id');
-      }
+        userId = parsed.userId;
+      } catch { console.warn('Could not parse PayPal custom_id'); }
+    }
+
+    // ✅ Enregistrer le paiement en base
+    if (userId) {
+      await prisma.payment.create({
+        data: {
+          userId,
+          amount,
+          currency: 'eur',
+          status: 'completed',
+          method: 'paypal',
+          paypalOrderId: orderId,
+        }
+      });
     }
 
     const clientEmail = clientInfo.email;
@@ -163,15 +168,7 @@ exports.capturePaypalOrder = async (req, res) => {
         await sendConfirmationEmail({ to: clientEmail, name: clientName, amount, method: 'paypal', title });
         console.log('📧 Email client PayPal envoyé à', clientEmail);
       }
-      await sendConfirmationEmail({
-        to: process.env.ADMIN_EMAIL,
-        name: clientName,
-        amount,
-        method: 'paypal',
-        title,
-        isAdminNotif: true,
-        clientInfo
-      });
+      await sendConfirmationEmail({ to: process.env.ADMIN_EMAIL, name: clientName, amount, method: 'paypal', title, isAdminNotif: true, clientInfo });
       console.log('📧 Email admin PayPal envoyé');
     } catch (emailErr) {
       console.error('Email error:', emailErr.message);

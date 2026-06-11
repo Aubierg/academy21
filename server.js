@@ -29,7 +29,7 @@ app.use((req, res, next) => {
 // ⚠️ Important : Webhook Stripe doit être AVANT express.json()
 app.post('/api/payments/webhook',
   express.raw({ type: '*/*' }),
-  function(req,res){ function(req,res){ require('./src/controllers/payments.controller').webhook(req,res); }(req,res); }
+  (req, res) => require('./src/controllers/payments.controller').webhook(req, res)
 );
 
 // Middleware JSON pour les autres routes
@@ -51,8 +51,8 @@ app.get('/', (req, res) => {
 // Gestion des erreurs
 app.use((err, req, res, next) => {
   console.error('❌ Erreur:', err.message);
-  res.status(err.status || 500).json({ 
-    error: err.message || 'Erreur interne du serveur' 
+  res.status(err.status || 500).json({
+    error: err.message || 'Erreur interne du serveur'
   });
 });
 
@@ -63,3 +63,5 @@ if (require.main === module) {
     console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
   });
 }
+
+module.exports = app;

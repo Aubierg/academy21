@@ -2,53 +2,153 @@ generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// ─── USER ────────────────────────────────────────────────
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
+  id           String        @id @default(uuid())
+  email        String        @unique
   password     String
-  role         String   @default("user")
+  role         String        @default("user")
   memberSince  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
   payments     Payment[]
-  createdAt    DateTime @default(now())
+  candidatures Candidature[]
+  certificates Certificate[]
 }
 
+// ─── FORMATION ───────────────────────────────────────────
 model Formation {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   title       String
   description String
   price       Float
+  duration    String    @default("20h")
   imageUrl    String?
-  payments    Payment[]
-  createdAt   DateTime @default(now())
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  modules      Module[]
+  payments     Payment[]
+  certificates Certificate[]
 }
 
+// ─── MODULE ──────────────────────────────────────────────
+model Module {
+  id          String    @id @default(uuid())
+  number      Int
+  title       String
+  videoUrl    String?
+  pdfUrl      String?
+  sessionDate DateTime?
+  duration    String    @default("4h")
+  createdAt   DateTime  @default(now())
+
+  formationId String
+  formation   Formation @relation(fields: [formationId], references: [id], onDelete: Cascade)
+
+  contents    Content[]
+  quiz        Quiz?
+}
+
+// ─── CONTENT ─────────────────────────────────────────────
+model Content {
+  id       String @id @default(uuid())
+  text     String
+  tp       String?
+
+  moduleId String
+  module   Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+}
+
+// ─── QUIZ ────────────────────────────────────────────────
+model Quiz {
+  id        String     @id @default(uuid())
+  createdAt DateTime   @default(now())
+
+  moduleId  String     @unique
+  module    Module     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  questions Question[]
+}
+
+// ─── QUESTION ────────────────────────────────────────────
+model Question {
+  id           String   @id @default(uuid())
+  text         String
+  options      String[]
+  correctIndex Int
+
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+}
+
+// ─── PAYMENT ─────────────────────────────────────────────
+model Payment {
+  id              String    @id @default(uuid())
+  amount          Float
+  currency        String    @default("eur")
+  status          String    @default("pending")
+  method          String
+  stripeSessionId String?
+  paypalOrderId   String?
+  createdAt       DateTime  @default(now())
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+
+  formationId String?
+  formation   Formation? @relation(fields: [formationId], references: [id])
+}
+
+// ─── CANDIDATURE ─────────────────────────────────────────
+model Candidature {
+  id         String   @id @default(uuid())
+  prenom     String
+  nom        String
+  email      String
+  telephone  String
+  diplome    String
+  motivation String
+  cvUrl      String?
+  status     String   @default("en_attente")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+}
+
+// ─── CERTIFICATE ─────────────────────────────────────────
+model Certificate {
+  id               String   @id @default(uuid())
+  issuedAt         DateTime @default(now())
+  completedModules Int      @default(5)
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+
+  formationId String
+  formation   Formation @relation(fields: [formationId], references: [id])
+}
+
+// ─── EVENT ───────────────────────────────────────────────
 model Event {
   id          String   @id @default(uuid())
   title       String
   description String
   date        DateTime
-  price       Float
+  price       Float    @default(0)
+  location    String?
+  isOnline    Boolean  @default(false)
   imageUrl    String?
   createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
-
-model Payment {
-  id              String   @id @default(uuid())
-  userId          String
-  user            User     @relation(fields: [userId], references: [id])
-  formationId     String?
-  formation       Formation? @relation(fields: [formationId], references: [id])
-  amount          Float
-  currency        String   @default("eur")
-  status          String   @default("pending")
-  stripeSessionId String?
-  paypalOrderId   String?
-  method          String
-  createdAt       DateTime @default(now())
-}
-
