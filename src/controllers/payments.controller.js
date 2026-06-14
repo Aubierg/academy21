@@ -23,7 +23,7 @@ exports.createCheckout = async (req, res) => {
     const { price = 490, title = 'Formation IA Marketing de Réseau', formationId, clientInfo } = req.body;
 
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
+      payment_method_types: ['card', 'link'],
       line_items: [{ price_data: { currency: 'eur', product_data: { name: title }, unit_amount: Math.round(price * 100) }, quantity: 1 }],
       mode: 'payment',
       success_url: `${process.env.FRONTEND_URL}/paiement/succes?session_id={CHECKOUT_SESSION_ID}`,
