@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 
 const app = express();
+app.use(require('compression')());
 
 app.set('trust proxy', 1);
 
